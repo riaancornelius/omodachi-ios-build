@@ -18,7 +18,7 @@ on:
       runner:
         description: "macOS runner image (must ship Xcode 27)"
         required: true
-        default: "macos-26"
+        default: "xcode-27"
 
 permissions:
   contents: write # the Release step creates a tag and release in this repo
@@ -38,11 +38,17 @@ jobs:
           ref: ${{ inputs.ref }}
           path: omodachi-ios
 
-      # The project requires Xcode 27 (README "Toolchain"). Pick the newest
-      # Xcode 27 the image has, and fail clearly if it has none.
+      # The project requires Xcode 27 (README "Toolchain"). Prefer the image's
+      # stable Xcode_27.app; otherwise the newest non-beta Xcode 27; fail
+      # clearly if there is none.
       - name: Select Xcode 27
         run: |
-          xcode="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)"
+          xcode=""
+          if [[ -d /Applications/Xcode_27.app ]]; then
+            xcode=/Applications/Xcode_27.app
+          else
+            xcode="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | grep -vi beta | sort -V | tail -1 || true)"
+          fi
           if [[ -z "$xcode" ]]; then
             echo "::error::No Xcode 27 on runner '${{ inputs.runner }}'. Installed:"
             ls -d /Applications/Xcode*.app
