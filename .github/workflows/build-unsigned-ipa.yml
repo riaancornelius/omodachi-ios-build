@@ -1,0 +1,107 @@
+# Builds an UNSIGNED Omodachi .ipa from github.com/omodachi/omodachi-ios on a
+# GitHub-hosted macOS runner, for sideloading with SideStore / AltStore (which
+# re-sign it with your own Apple ID on install).
+#
+# Put this file in its own (public) repository; it checks the iOS source out
+# itself, so no fork is needed. Run it from the Actions tab → "Build unsigned
+# IPA" → Run workflow, then download the "Omodachi-ipa" artifact.
+
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "omodachi-ios tag, branch or commit to build"
+        required: true
+        default: "v0.2.0"
+      runner:
+        description: "macOS runner image (must ship Xcode 27)"
+        required: true
+        default: "macos-26"
+
+permissions:
+  contents: write # the Release step creates a tag and release in this repo
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 60
+    env:
+      OMODACHI_DERIVED_DATA: ${{ github.workspace }}/derived
+
+    steps:
+      - name: Check out omodachi-ios
+        uses: actions/checkout@v4
+        with:
+          repository: omodachi/omodachi-ios
+          ref: ${{ inputs.ref }}
+          path: omodachi-ios
+
+      # The project requires Xcode 27 (README "Toolchain"). Pick the newest
+      # Xcode 27 the image has, and fail clearly if it has none.
+      - name: Select Xcode 27
+        run: |
+          xcode="$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [[ -z "$xcode" ]]; then
+            echo "::error::No Xcode 27 on runner '${{ inputs.runner }}'. Installed:"
+            ls -d /Applications/Xcode*.app
+            exit 1
+          fi
+          sudo xcode-select -s "$xcode/Contents/Developer"
+          xcodebuild -version
+
+      # Release archive with signing disabled (scripts/build.sh archive). It
+      # already passes -skipPackagePluginValidation / -skipMacroValidation.
+      - name: Build unsigned release archive
+        working-directory: omodachi-ios
+        run: scripts/build.sh archive
+
+      - name: Package .ipa
+        id: package
+        run: |
+          app="$OMODACHI_DERIVED_DATA/archive/Omodachi.xcarchive/Products/Applications/Omodachi.app"
+          [[ -d "$app" ]] || { echo "::error::$app not found"; exit 1; }
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$app/Info.plist")"
+          build="$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' "$app/Info.plist")"
+          mkdir -p out/Payload
+          cp -R "$app" out/Payload/
+          (cd out && zip -qry "Omodachi-$version-$build-unsigned.ipa" Payload)
+          rm -rf out/Payload
+          # A copy under a fixed name, so .../releases/latest/download/Omodachi-unsigned.ipa
+          # always points at the newest build.
+          cp "out/Omodachi-$version-$build-unsigned.ipa" out/Omodachi-unsigned.ipa
+          ls -lh out
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git -C omodachi-ios rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Omodachi-ipa
+          path: out/*.ipa
+          if-no-files-found: error
+          retention-days: 14
+
+      # One release per build, tagged in THIS repo. The newest is marked
+      # "latest", so the fixed-name asset gives SideStore a stable URL.
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.package.outputs.version }}
+          BUILD: ${{ steps.package.outputs.build }}
+          COMMIT: ${{ steps.package.outputs.commit }}
+          REF: ${{ inputs.ref }}
+        run: |
+          tag="omodachi-$VERSION-$BUILD"
+          gh release create "$tag" out/*.ipa \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Omodachi $VERSION (build $BUILD, unsigned)" \
+            --latest \
+            --notes "Unsigned build of [omodachi/omodachi-ios](https://github.com/omodachi/omodachi-ios) at \`$REF\` (commit \`$COMMIT\`).
+
+          Install with SideStore or AltStore; they re-sign it with your Apple ID.
+          Stable link to the newest build:
+          https://github.com/$GITHUB_REPOSITORY/releases/latest/download/Omodachi-unsigned.ipa"
