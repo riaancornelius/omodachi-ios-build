@@ -57,6 +57,11 @@ jobs:
           sudo xcode-select -s "$xcode/Contents/Developer"
           xcodebuild -version
 
+      # The app compiles Metal shaders; Xcode 27 ships the Metal toolchain as a
+      # separate download that the runner image does not include.
+      - name: Install Metal toolchain
+        run: xcodebuild -downloadComponent MetalToolchain
+
       # Release archive with signing disabled (scripts/build.sh archive). It
       # already passes -skipPackagePluginValidation / -skipMacroValidation.
       - name: Build unsigned release archive
